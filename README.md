@@ -2,104 +2,116 @@
 
 **Evading NeuroIDS: Adversarial Attack Analysis and Hardening for Neuromorphic Intrusion Detection**
 
-Author: Toby R. Davis
-Department of Computer Science and Engineering
-Mississippi State University
+Toby R. Davis — Department of Computer Science and Engineering, Mississippi State University
+
+[![DOI](https://img.shields.io/badge/NeuroIDS-10.13140%2FRG.2.2.23827.13604-blue)](https://www.researchgate.net/doi/10.13140/RG.2.2.23827.13604)
+[![DOI](https://img.shields.io/badge/NeuroIDS--Sat-10.13140%2FRG.2.2.16893.42724-blue)](https://www.researchgate.net/doi/10.13140/RG.2.2.16893.42724)
 
 ---
 
 ## Overview
 
-NeuroIDS-Adversarial is a research framework that evaluates the adversarial robustness of spiking neural networks (SNNs) used for network intrusion detection. This project extends [NeuroIDS](https://github.com/SephDavis/NeuroIDS) by systematically attacking the neuromorphic classifier, analyzing its vulnerability surface, and implementing defensive hardening strategies.
+NeuroIDS-Adversarial is a research framework for evaluating the adversarial robustness of spiking neural networks (SNNs) used for network intrusion detection. This project extends [NeuroIDS](https://github.com/SephDavis/NeuroIDS) by systematically attacking the neuromorphic classifier, analyzing its vulnerability surface across all five attack categories, and implementing defensive hardening strategies.
 
-The core question this work addresses: **Can an adversary craft network traffic that evades a neuromorphic intrusion detection system, and if so, how do we defend against it?**
+**Core question:** Can an adversary craft network traffic that evades a neuromorphic intrusion detection system, and if so, how do we defend against it?
 
-SNNs present a unique adversarial challenge. Unlike conventional deep neural networks, spike-based classifiers are inherently non-differentiable due to discrete spike generation, which means standard gradient-based attacks (FGSM, PGD) cannot be applied directly. This project adapts these attacks for SNNs using numerical gradient estimation and introduces SNN-specific attack vectors that exploit temporal spike dynamics.
+**Key findings:**
+- FGSM reduces SNN accuracy from 62.4% to 54.1% at ε=0.20 (7.5pp degradation)
+- PGD provides only marginal improvement over FGSM due to SNN stochasticity
+- Mimicry attacks evade detection for ~46% of malicious traffic at ε=0.20
+- Adversarial attacks disproportionately amplify the existing attack→Normal misclassification bias
+- Adversarial training improves *both* clean accuracy and adversarial robustness simultaneously — atypical for deep learning, attributable to regularization on output-layer-only training
+- SNN stochasticity provides partial inherent robustness confirmed against an adaptive adversary
 
 ## Motivation
 
-Neuromorphic intrusion detection systems offer significant advantages in power efficiency and real-time processing, but their robustness against adversarial manipulation remains largely unexplored. As these systems move toward deployment in resource-constrained environments (CubeSat constellations, edge networks, IoT infrastructure), understanding their failure modes under adversarial pressure is critical.
+Neuromorphic IDS offer dramatic power efficiency advantages (1,500 pJ per inference vs. 45 mJ for conventional CPUs), making them viable for deployment in resource-constrained environments — CubeSat constellations, tactical edge networks, IoT infrastructure. But power efficiency means nothing if an adversary can trivially evade detection.
 
-This work provides:
-
-- **Offensive analysis** — Multiple attack strategies tailored for spiking neural networks, including a novel spike timing attack that exploits temporal dynamics unique to SNNs
-- **Defensive hardening** — Practical defense mechanisms ranging from input preprocessing to adversarial training, with quantified robustness improvements
-- **Attack-defense tradeoff analysis** — Evaluation across perturbation magnitudes (ε = 0.01 to 0.20) showing how accuracy degrades under attack and recovers with defenses applied
+Prior work on NeuroIDS and NeuroIDS-Sat identified that the dominant failure mode is attack→Normal misclassification. This project quantifies how adversarial perturbation amplifies that failure mode and establishes practical defenses.
 
 ## Architecture
 
-The SNN classifier follows the NeuroIDS architecture:
+The SNN classifier follows the NeuroIDS architecture with output-layer-only training to isolate the adversarial vulnerability of the SNN representation itself:
 
-- **Encoding layer** — Rate-coded spike encoding converts normalized network features into spike trains
-- **Hidden layer 1** — 96 Leaky Integrate-and-Fire (LIF) neurons with membrane time constant τ_m = 20ms
-- **Hidden layer 2** — 48 LIF neurons
-- **Output layer** — Spike count-based classification across 5 categories (Normal, DoS, Probe, R2L, U2R)
-- **Simulation** — 75 timesteps per inference, refractory period τ_ref = 3ms
+| Component | Configuration |
+|-----------|--------------|
+| Encoding | Rate-coded spike trains, r_base=0.1, r_max=0.5 |
+| Hidden layer 1 | 96 LIF neurons, τ_m=20ms, V_thresh=0.6 |
+| Hidden layer 2 | 48 LIF neurons |
+| Output | Linear readout from spike counts → 5 classes |
+| Simulation | 75 timesteps, Δt=1ms, τ_ref=3ms |
+| Training | Focal loss (γ=2.0), inverse-frequency class weights |
+| Parameters | 8,933 total |
 
-Training uses focal loss with adaptive class scaling to handle the severe class imbalance in NSL-KDD (U2R has only 52 training samples vs. 67,343 Normal samples).
+Output-layer-only training (frozen hidden weights, learned linear readout) is used deliberately: perturbations that change the spike count feature vector reveal properties of the spiking dynamics rather than the output layer decision boundary.
 
 ## Attacks Implemented
 
-### Fast Gradient Sign Method (FGSM)
+### FGSM (Fast Gradient Sign Method)
+Single-step perturbation using SPSA-based numerical gradient estimation (N=5 samples, σ=0.01). Standard backpropagation is impossible through the non-differentiable spike generation threshold.
 
-Single-step perturbation in the direction of the estimated gradient sign. Because SNNs are non-differentiable, we use SPSA-based numerical gradient estimation with random perturbation directions rather than backpropagation.
-
-```
-X_adv = X + ε · sign(∇_x L(θ, X, y))
-```
-
-### Projected Gradient Descent (PGD)
-
-Iterative attack with random initialization and projection back to the ε-ball at each step. Stronger than FGSM but computationally more expensive. Runs 10 iterations with step size α = ε/4.
-
-```
-X_adv^(t+1) = Π_{ε-ball}(X_adv^(t) + α · sign(∇_x L))
-```
+### PGD (Projected Gradient Descent)
+Iterative attack with 10 steps, random initialization, step size α=ε/4, projection back to ℓ∞ ε-ball. SPSA ablation (N=5→50) shows PGD separates from FGSM only with higher gradient fidelity, confirming SNN stochasticity as the dominant factor limiting iterative refinement.
 
 ### Spike Timing Attack
-
-An SNN-specific attack that exploits the temporal sensitivity of spike generation. Small perturbations to features near the firing threshold shift when spikes occur during the 75-timestep simulation window, potentially altering the spike count distribution enough to cause misclassification. This attack targets high-importance features identified through gradient magnitude analysis.
+SNN-specific attack targeting features with high gradient magnitude (above median). Perturbs *when* neurons fire within the 75-timestep window. Results confirm spike count-based readout provides architectural robustness to temporal perturbation — count aggregation acts as a low-pass filter over timing noise.
 
 ### Mimicry Attack
+Transforms malicious traffic toward the normal class centroid, bounded by ε. Per-class analysis reveals R2L achieves highest evasion (~62%) since these attacks inherently mimic legitimate access patterns, while DoS achieves lowest (~45%) due to larger feature distance from normal traffic.
 
-Transforms malicious traffic to statistically resemble normal traffic while staying within the perturbation budget. Computes the mean and standard deviation of normal traffic features and shifts malicious samples toward that distribution, bounded by ε. Particularly relevant for evading anomaly-based detection.
-
-### Combined Evasion Attack
-
-Multi-stage attack that applies FGSM first, then refines still-detected samples with mimicry. Models a realistic adversary who uses multiple strategies in sequence.
+### Combined Evasion
+Multi-stage: FGSM first, then mimicry refinement on still-detected samples.
 
 ## Defenses Implemented
 
 ### Input Preprocessing
-
-- **Gaussian noise injection** — Adds random noise (σ = 0.05) to disrupt adversarial perturbations while preserving clean accuracy
-- **Feature squeezing** — Reduces feature precision to discrete bins (4-bit depth), removing small perturbations below the quantization threshold
-- **Median filtering** — Replaces each feature with the median of neighboring features, smoothing out localized perturbations
+- **Gaussian noise** (σ=0.05) — Randomization to disrupt adversarial structure
+- **Feature squeezing** (4-bit) — Quantization to remove sub-threshold perturbations
+- **Median filtering** — Smoothing across neighboring features
 
 ### SNN-Specific Defenses
+- **Temporal averaging** — Averages predictions across M=5 stochastic forward passes, exploiting the fact that adversarial examples optimized against one spike realization transfer poorly to others
+- **Spike consistency check** — Flags samples with inconsistent predictions across multiple runs as potentially adversarial
 
-- **Temporal averaging** — Exploits the stochastic nature of spike generation by averaging predictions across multiple forward passes. Adversarial examples tuned to a single spike pattern become less effective when the pattern varies
-- **Spike consistency check** — Runs multiple inference passes and flags samples with inconsistent predictions as potentially adversarial. Clean samples produce stable predictions; adversarial samples near decision boundaries do not
+### Adaptive Adversary Evaluation
+Temporal averaging is evaluated against an adaptive adversary that averages gradients over M_a=5 stochastic passes before computing perturbations. Results confirm partial but genuine inherent robustness from SNN stochasticity.
 
 ### Adversarial Training
+Mixed training on 50% clean + 50% FGSM adversarial examples (ε=0.1). Early stopping on combined clean/adversarial validation accuracy. Uniquely for SNNs, this improves both clean and adversarial performance simultaneously.
 
-Trains a new model on a mixed dataset of 50% clean and 50% FGSM-generated adversarial examples. Uses early stopping based on a combined metric of clean and adversarial validation accuracy to balance robustness with baseline performance.
+## Experiment Suite
+
+Running `python main.py` generates data for every table in the paper:
+
+| Function | Paper Table | Description |
+|----------|------------|-------------|
+| `table_ii_baseline()` | Table II | Per-class precision, recall, F1, support |
+| `table_iii_gradient_attacks()` | Table III | FGSM (ε=0.01–0.20) and PGD (ε=0.05–0.15) |
+| `table_iv_spsa_ablation()` | Table IV | SPSA sample count ablation (N=5,10,20,50) |
+| `table_v_perclass_fgsm()` | Table V | Per-class recall degradation under FGSM |
+| `table_vi_misclassification_direction()` | Table VI | Dominant misclassification target per class |
+| `table_vii_spike_timing()` | Table VII | Spike timing attack (η=0.05–0.20) |
+| `table_viii_mimicry_perclass()` | Table VIII | Mimicry evasion rate by attack class |
+| `table_ix_mimicry_vs_eps()` | Table IX | Mimicry evasion vs perturbation budget |
+| `table_x_defenses()` | Table X | All defenses: clean and FGSM accuracy |
+| `table_xi_adaptive_adversary()` | Table XI | Standard vs adaptive FGSM against temporal averaging |
+| `table_xii_adversarial_training()` | Table XII | Adversarial training comparison with baseline |
+
+Additionally generates full 5×5 confusion matrices for baseline and adversarially trained models, with all results exported to `results.json`.
 
 ## Dataset
 
-This project uses the [NSL-KDD](https://www.unb.ca/cic/datasets/nsl.html) dataset, a refined version of KDD Cup 1999 that removes duplicate records and provides a more balanced test set.
+Uses the [NSL-KDD](https://www.unb.ca/cic/datasets/nsl.html) dataset:
 
-**Classes:**
+| Category | Train | Test | Train % |
+|----------|-------|------|---------|
+| Normal | 67,343 | 9,711 | 53.5% |
+| DoS | 45,927 | 7,458 | 36.5% |
+| Probe | 11,656 | 2,421 | 9.3% |
+| R2L | 995 | 2,754 | 0.8% |
+| U2R | 52 | 200 | 0.04% |
 
-| Category | Description | Train Samples | Test Samples |
-|----------|-------------|---------------|--------------|
-| Normal | Legitimate traffic | 67,343 | 9,711 |
-| DoS | Denial of Service | 45,927 | 7,458 |
-| Probe | Surveillance/scanning | 11,656 | 2,421 |
-| R2L | Remote to Local | 995 | 2,754 |
-| U2R | User to Root | 52 | 200 |
-
-To use real data, place `KDDTrain+.txt` and `KDDTest+.txt` in `./data/`. The loader also checks `./data/NSL-KDD/`. If no data files are found, synthetic data is generated as a fallback.
+Minority classes are oversampled to 10% of the majority class count with Gaussian noise augmentation (σ=0.01). Place `KDDTrain+.txt` and `KDDTest+.txt` in `./data/`. If no data files are found, synthetic data is generated as a fallback.
 
 ## Quick Start
 
@@ -113,57 +125,72 @@ scipy>=1.7.0
 ### Installation
 
 ```bash
-git clone https://github.com/sephdavis/neuroids-adversarial.git
-cd neuroids-adversarial
+git clone https://github.com/SephDavis/NeuroIDS-Adversarial.git
+cd NeuroIDS-Adversarial
 pip install -r requirements.txt
 ```
 
 ### Running Experiments
 
-Run all experiments (training, attacks, defenses):
-
+Full run (all tables, ~30–60 min on full test set):
 ```bash
-python main.py --experiment all --epochs 20
+python main.py
 ```
 
-Run individual phases:
+Fast iteration (subset of test data, fewer epochs):
+```bash
+python main.py --test-subset 2000 --epochs 10 --adv-epochs 8
+```
 
+Skip the slow SPSA ablation:
+```bash
+python main.py --experiment quick
+```
+
+Individual phases:
 ```bash
 python main.py --experiment train --epochs 20
 python main.py --experiment attack
 python main.py --experiment defense
 ```
 
+Force unbuffered output on Windows:
+```bash
+python -u main.py
+```
+
 ## Project Structure
 
 ```
-neuroids-adversarial/
-├── main.py                      # Experiment runner
-├── requirements.txt             # Python dependencies
+NeuroIDS-Adversarial/
+├── main.py                    # Comprehensive experiment runner (all paper tables)
+├── requirements.txt
 ├── README.md
-├── data/                        # NSL-KDD dataset (not included)
-│   ├── KDDTrain+.txt
-│   └── KDDTest+.txt
+├── results.json               # Generated experiment results (after running main.py)
+├── data/
+│   ├── KDDTrain+.txt          # NSL-KDD training set (not included, download separately)
+│   └── KDDTest+.txt           # NSL-KDD test set
 └── src/
-    ├── snn_model.py             # SNN with LIF neurons, focal loss, spike count classification
-    ├── adversarial_attacks.py   # FGSM, PGD, spike timing, mimicry, combined evasion
-    ├── adversarial_defenses.py  # Adversarial training, input denoising, temporal averaging
-    └── data_loader.py           # NSL-KDD loading, normalization, balancing
+    ├── __init__.py
+    ├── snn_model.py           # SNN with LIF neurons, focal loss, spike count classification
+    ├── adversarial_attacks.py # FGSM, PGD, spike timing, mimicry, combined evasion
+    ├── adversarial_defenses.py # Adversarial training, input denoising, temporal averaging
+    └── data_loader.py         # NSL-KDD loading, normalization, balancing, synthetic fallback
 ```
 
 ## Related Work
 
-- **NeuroIDS** — Neuromorphic intrusion detection achieving 73.4% accuracy on NSL-KDD with 1,620 pJ per inference
-- **NeuroIDS-Sat** — Space-adapted variant for CubeSat constellations with radiation tolerance via triple modular redundancy
-- **BlackLock** — Post-quantum encryption system using Ring-LWR for securing neuromorphic IDS communications
+- **[NeuroIDS](https://www.researchgate.net/doi/10.13140/RG.2.2.23827.13604)** — Neuromorphic intrusion detection achieving 73.4% accuracy on NSL-KDD at 1,620 pJ per inference
+- **[NeuroIDS-Sat](https://www.researchgate.net/doi/10.13140/RG.2.2.16893.42724)** — Space-adapted variant for CubeSat constellations with radiation tolerance via triple modular redundancy, 70.1% accuracy at 1.52 mW
 
 ## Citation
 
 ```bibtex
 @article{davis2026neuroids-adversarial,
-  title={Evading NeuroIDS: Adversarial Attack Analysis and Hardening 
+  title={Evading NeuroIDS: Adversarial Attack Analysis and Hardening
          for Neuromorphic Intrusion Detection},
   author={Davis, Toby R.},
+  institution={Mississippi State University},
   year={2026}
 }
 ```
